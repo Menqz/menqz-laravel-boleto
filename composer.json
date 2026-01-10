@@ -1,8 +1,12 @@
 {
     "name": "eduardokum/laravel-boleto",
-    "description": "Biblioteca com boletos para o laravel",
+    "description": "Fork corporativo do pacote laravel-boleto com ajustes e compatibilidade com Laravel 12, mantido pela Menqz Tecnologia",
     "keywords": [
-        "eduardokum",
+        "laravel",
+        "boleto",
+        "banking",
+        "erp",
+        "menqz",
         "laravel-boleto"
     ],
     "homepage": "https://github.com/eduardokum/laravel-boleto",
@@ -11,6 +15,12 @@
         {
             "name": "Eduardo Gusmão",
             "email": "eduguscontra3@hotmail.com"
+        },
+        {
+            "name": "Menqz Tecnologia",
+            "email": "contato@menqz.com.br",
+            "homepage": "https://menqz.com.br",
+            "role": "Maintainer (Fork corporativo)"
         }
     ],
     "require": {
