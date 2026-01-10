@@ -7,6 +7,8 @@ interface Pessoa
     public function getTipo();
 
     public function getNome();
+    
+    public function getNomeFantasia();
 
     public function getNomeDocumento();
 
