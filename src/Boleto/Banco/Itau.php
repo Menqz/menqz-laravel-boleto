@@ -6,9 +6,9 @@ use Eduardokum\LaravelBoleto\Util;
 use Eduardokum\LaravelBoleto\CalculoDV;
 use Eduardokum\LaravelBoleto\Boleto\AbstractBoleto;
 use Eduardokum\LaravelBoleto\Exception\ValidationException;
-use Eduardokum\LaravelBoleto\Contracts\Boleto\Boleto as BoletoContract;
+use Eduardokum\LaravelBoleto\Contracts\Boleto\BoletoAPI as BoletoAPIContract;
 
-class Itau extends AbstractBoleto implements BoletoContract
+class Itau extends AbstractBoleto implements BoletoAPIContract
 {
     /**
      * Local de pagamento
@@ -150,5 +150,63 @@ class Itau extends AbstractBoleto implements BoletoContract
             'contaCorrente'   => substr($campoLivre, 16, 5),
             'contaCorrenteDv' => substr($campoLivre, 21, 1),
         ];
+    }
+
+    public function toAPI()
+    {
+        $documentoPagador = Util::onlyNumbers($this->getPagador()->getDocumento());
+        $tipoPessoa = strlen($documentoPagador) == 14 ? 'J' : 'F';
+
+        $idBeneficiario = Util::numberFormatGeral($this->getAgencia(), 4)
+            . Util::numberFormatGeral($this->getConta(), 7)
+            . Util::numberFormatGeral($this->getContaDv(), 1);
+
+        $tipoPessoaCampos = [
+            'codigo_tipo_pessoa' => $tipoPessoa,
+        ];
+
+        if ($tipoPessoa === 'J') {
+            $tipoPessoaCampos['numero_cadastro_nacional_pessoa_juridica'] = $documentoPagador;
+        } else {
+            $tipoPessoaCampos['numero_cadastro_pessoa_fisica'] = $documentoPagador;
+        }
+
+        return [
+            'data' => [
+                'etapa_processo_boleto' => 'efetivacao',
+                'codigo_canal_operacao' => 'API',
+                'beneficiario' => [
+                    'id_beneficiario' => $idBeneficiario,
+                ],
+                'dado_boleto' => [
+                    'descricao_instrumento_cobranca' => 'boleto',
+                    'tipo_boleto' => 'a vista',
+                    'codigo_carteira' => $this->getCarteira(),
+                    'nosso_numero' => Util::onlyNumbers($this->getNossoNumero()),
+                    'valor_total_titulo' => Util::nFloat($this->getValor(), 2, false),
+                    'codigo_especie' => '01',
+                    'data_emissao' => $this->getDataDocumento()->format('Y-m-d'),
+                    'data_vencimento' => $this->getDataVencimento()->format('Y-m-d'),
+                    'pagador' => [
+                        'pessoa' => [
+                            'nome_pessoa' => $this->getPagador()->getNome(),
+                            'tipo_pessoa' => $tipoPessoaCampos,
+                        ],
+                        'endereco' => [
+                            'logradouro' => $this->getPagador()->getEndereco(),
+                            'bairro' => $this->getPagador()->getBairro(),
+                            'cidade' => $this->getPagador()->getCidade(),
+                            'uf' => $this->getPagador()->getUf(),
+                            'cep' => Util::onlyNumbers($this->getPagador()->getCep()),
+                        ],
+                    ],
+                ],
+            ],
+        ];
+    }
+
+    public static function fromAPI($boleto, $appends)
+    {
+        throw new ValidationException('Método fromAPI ainda não implementado para o banco Itaú.');
     }
 }

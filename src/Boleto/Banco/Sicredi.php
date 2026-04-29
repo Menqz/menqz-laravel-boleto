@@ -6,9 +6,9 @@ use Eduardokum\LaravelBoleto\Util;
 use Eduardokum\LaravelBoleto\CalculoDV;
 use Eduardokum\LaravelBoleto\Boleto\AbstractBoleto;
 use Eduardokum\LaravelBoleto\Exception\ValidationException;
-use Eduardokum\LaravelBoleto\Contracts\Boleto\Boleto as BoletoContract;
+use Eduardokum\LaravelBoleto\Contracts\Boleto\BoletoAPI as BoletoAPIContract;
 
-class Sicredi extends AbstractBoleto implements BoletoContract
+class Sicredi extends AbstractBoleto implements BoletoAPIContract
 {
     public function __construct(array $params = [])
     {
@@ -292,5 +292,56 @@ class Sicredi extends AbstractBoleto implements BoletoContract
             'agencia'         => substr($campoLivre, 11, 4),
             //'contaCorrente' => substr($campoLivre, 17, 5),
         ];
+    }
+
+    public function toAPI()
+    {
+        $documentoPagador = Util::onlyNumbers($this->getPagador()->getDocumento());
+        $tipoPessoa = strlen($documentoPagador) == 14 ? 'J' : 'F';
+
+        $tipoPessoaCampos = [
+            'codigo_tipo_pessoa' => $tipoPessoa,
+        ];
+
+        if ($tipoPessoa === 'J') {
+            $tipoPessoaCampos['numero_cadastro_nacional_pessoa_juridica'] = $documentoPagador;
+        } else {
+            $tipoPessoaCampos['numero_cadastro_pessoa_fisica'] = $documentoPagador;
+        }
+
+        return [
+            'data' => [
+                'beneficiario' => [
+                    'codigo_beneficiario' => $this->getCodigoCliente(),
+                    'cooperativa' => $this->getAgencia(),
+                    'posto' => $this->getPosto(),
+                ],
+                'dado_boleto' => [
+                    'nosso_numero' => Util::onlyNumbers($this->getNossoNumero()),
+                    'valor_titulo' => Util::nFloat($this->getValor(), 2, false),
+                    'data_emissao' => $this->getDataDocumento()->format('Y-m-d'),
+                    'data_vencimento' => $this->getDataVencimento()->format('Y-m-d'),
+                    'carteira' => $this->getCarteira(),
+                    'pagador' => [
+                        'pessoa' => [
+                            'nome_pessoa' => $this->getPagador()->getNome(),
+                            'tipo_pessoa' => $tipoPessoaCampos,
+                        ],
+                        'endereco' => [
+                            'logradouro' => $this->getPagador()->getEndereco(),
+                            'bairro' => $this->getPagador()->getBairro(),
+                            'cidade' => $this->getPagador()->getCidade(),
+                            'uf' => $this->getPagador()->getUf(),
+                            'cep' => Util::onlyNumbers($this->getPagador()->getCep()),
+                        ],
+                    ],
+                ],
+            ],
+        ];
+    }
+
+    public static function fromAPI($boleto, $appends)
+    {
+        throw new ValidationException('Método fromAPI ainda não implementado para o banco Sicredi.');
     }
 }
