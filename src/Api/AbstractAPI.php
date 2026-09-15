@@ -115,6 +115,18 @@ abstract class AbstractAPI implements Api
 
     abstract public function getPdfID($id);
 
+    abstract public function alterarVencimentoNossoNumero($nossoNumero, $novaData);
+
+    abstract public function alterarVencimentoID($id, $novaData);
+
+    abstract public function alterarValorNossoNumero($nossoNumero, $novoValor);
+
+    abstract public function alterarValorID($id, $novoValor);
+
+    abstract public function baixarBoletoNossoNumero($nossoNumero, $motivo);
+
+    abstract public function baixarBoletoID($id, $motivo);
+
     /**
      * @param $url
      * @param $type
@@ -126,18 +138,72 @@ abstract class AbstractAPI implements Api
         throw new ValidationException('Método não disponível no banco');
     }
 
+    /**
+     * @param BoletoAPIContract $boleto
+     * @param $novaData
+     * @return mixed
+     */
+    public function alterarVencimento(BoletoAPIContract $boleto, $novaData)
+    {
+        if ($boleto->getID()) {
+            return $this->alterarVencimentoID($boleto->getID(), $novaData);
+        }
+
+        return $this->alterarVencimentoNossoNumero($boleto->getNossoNumero(), $novaData);
+    }
+
+    /**
+     * @param BoletoAPIContract $boleto
+     * @param $novoValor
+     * @return mixed
+     */
+    public function alterarValor(BoletoAPIContract $boleto, $novoValor)
+    {
+        if ($boleto->getID()) {
+            return $this->alterarValorID($boleto->getID(), $novoValor);
+        }
+
+        return $this->alterarValorNossoNumero($boleto->getNossoNumero(), $novoValor);
+    }
+
+    /**
+     * @param BoletoAPIContract $boleto
+     * @param $motivo
+     * @return mixed
+     */
+    public function baixarBoleto(BoletoAPIContract $boleto, $motivo)
+    {
+        if ($boleto->getID()) {
+            return $this->baixarBoletoID($boleto->getID(), $motivo);
+        }
+
+        return $this->baixarBoletoNossoNumero($boleto->getNossoNumero(), $motivo);
+    }
+
     public function retrieve(BoletoAPIContract $boleto)
     {
+        if ($boleto->getID()) {
+            return $this->retrieveID($boleto->getID());
+        }
+
         return $this->retrieveNossoNumero($boleto->getNossoNumero());
     }
 
     public function cancel(BoletoAPIContract $boleto, $motivo)
     {
+        if ($boleto->getID()) {
+            return $this->cancelID($boleto->getID(), $motivo);
+        }
+
         return $this->cancelNossoNumero($boleto->getNossoNumero(), $motivo);
     }
 
     public function getPdf(BoletoAPIContract $boleto)
     {
+        if ($boleto->getID()) {
+            return $this->getPdfID($boleto->getID());
+        }
+
         return $this->getPdfNossoNumero($boleto->getNossoNumero());
     }
 
@@ -511,6 +577,35 @@ abstract class AbstractAPI implements Api
         curl_setopt($this->curl, CURLOPT_URL, $this->getBaseUrl() . $url);
         curl_setopt($this->curl, CURLOPT_POST, 1);
         curl_setopt($this->curl, CURLOPT_CUSTOMREQUEST, 'PUT');
+        curl_setopt($this->curl, CURLOPT_POSTFIELDS, $raw ? http_build_query($post) : json_encode($post));
+
+        return $this->execute();
+    }
+
+    /**
+     * @throws HttpException
+     * @throws UnauthorizedException
+     * @throws CurlException
+     */
+    protected function patch($url, array $post, $raw = false, $clear = true)
+    {
+        $url = ltrim($url, '/');
+        $this->init()
+            ->setHeaders(array_filter([
+                'Accept'       => $raw ? null : 'application/json',
+                'Content-type' => $raw ? 'application/x-www-form-urlencoded' : 'application/json',
+            ]));
+
+        // clean string
+        if ($clear) {
+            $post = $this->arrayMapRecursive(function ($data) {
+                return Util::normalizeChars($data);
+            }, $post);
+        }
+
+        curl_setopt($this->curl, CURLOPT_URL, $this->getBaseUrl() . $url);
+        curl_setopt($this->curl, CURLOPT_POST, 1);
+        curl_setopt($this->curl, CURLOPT_CUSTOMREQUEST, 'PATCH');
         curl_setopt($this->curl, CURLOPT_POSTFIELDS, $raw ? http_build_query($post) : json_encode($post));
 
         return $this->execute();

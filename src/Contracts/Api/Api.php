@@ -24,6 +24,24 @@ interface Api
 
     public function createWebhook($url, $type = 'all');
 
+    public function alterarVencimento(BoletoAPI $boleto, $novaData);
+
+    public function alterarVencimentoID($id, $novaData);
+
+    public function alterarVencimentoNossoNumero($nossoNumero, $novaData);
+
+    public function alterarValor(BoletoAPI $boleto, $novoValor);
+
+    public function alterarValorID($id, $novoValor);
+
+    public function alterarValorNossoNumero($nossoNumero, $novoValor);
+
+    public function baixarBoleto(BoletoAPI $boleto, $motivo);
+
+    public function baixarBoletoID($id, $motivo);
+
+    public function baixarBoletoNossoNumero($nossoNumero, $motivo);
+
     public function retrieve(BoletoAPI $boleto);
 
     public function cancel(BoletoAPI $boleto, $motivo);
