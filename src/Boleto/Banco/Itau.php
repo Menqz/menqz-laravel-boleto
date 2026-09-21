@@ -173,6 +173,34 @@ class Itau extends AbstractBoleto implements BoletoAPIContract
             $tipoPessoaCampos['numero_cadastro_pessoa_fisica'] = $documentoPagador;
         }
 
+        $pagador = $this->getPagador();
+        $extrair = function ($metodo, $padrao = '') use ($pagador) {
+            if (is_object($pagador) && method_exists($pagador, $metodo)) {
+                $valor = $pagador->{$metodo}();
+                if ($valor !== null && $valor !== '') {
+                    return (string) $valor;
+                }
+            }
+            $campo = lcfirst(substr($metodo, 3));
+            if (is_object($pagador) && property_exists($pagador, $campo)) {
+                $valor = $pagador->{$campo};
+                if ($valor !== null && $valor !== '') {
+                    return (string) $valor;
+                }
+            }
+            if (is_array($pagador) && isset($pagador[$campo])) {
+                $valor = $pagador[$campo];
+                if ($valor !== null && $valor !== '') {
+                    return (string) $valor;
+                }
+            }
+
+            return (string) $padrao;
+        };
+
+        $valorCents = (int) round((float) $this->getValor() * 100);
+        $valorTotal = str_pad((string) $valorCents, 17, '0', STR_PAD_LEFT);
+
         return [
             'data' => [
                 'etapa_processo_boleto' => 'efetivacao',
@@ -185,7 +213,7 @@ class Itau extends AbstractBoleto implements BoletoAPIContract
                     'tipo_boleto' => 'a vista',
                     'codigo_carteira' => $this->getCarteira(),
                     'nosso_numero' => Util::onlyNumbers($this->getNossoNumero()),
-                    'valor_total_titulo' => Util::nFloat($this->getValor(), 2, false),
+                    'valor_total_titulo' => $valorTotal,
                     'codigo_especie' => '01',
                     'data_emissao' => $this->getDataDocumento()->format('Y-m-d'),
                     'data_vencimento' => $this->getDataVencimento()->format('Y-m-d'),
@@ -195,11 +223,16 @@ class Itau extends AbstractBoleto implements BoletoAPIContract
                             'tipo_pessoa' => $tipoPessoaCampos,
                         ],
                         'endereco' => [
-                            'logradouro' => $this->getPagador()->getEndereco(),
-                            'bairro' => $this->getPagador()->getBairro(),
-                            'cidade' => $this->getPagador()->getCidade(),
-                            'uf' => $this->getPagador()->getUf(),
-                            'cep' => Util::onlyNumbers($this->getPagador()->getCep()),
+                            'logradouro'       => $this->getPagador()->getEndereco(),
+                            'numero'           => $extrair('getNumero', 'S/N'),
+                            'complemento'      => $extrair('getComplemento', ''),
+                            'bairro'           => $this->getPagador()->getBairro(),
+                            'cidade'           => $this->getPagador()->getCidade(),
+                            'uf'               => $this->getPagador()->getUf(),
+                            'cep'              => Util::onlyNumbers($this->getPagador()->getCep()),
+                            'pais'             => $extrair('getPais', 'Brasil'),
+                            'codigo_municipio' => $extrair('getCodigoMunicipio', ''),
+                            'codigo_pais'      => $extrair('getCodigoPais', '1058'),
                         ],
                     ],
                 ],

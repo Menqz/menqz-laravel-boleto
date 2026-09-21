@@ -45,6 +45,8 @@ abstract class AbstractAPI implements Api
 
     protected $beneficiario;
 
+    protected $sslVerify = true;
+
     private $curl;
 
     private $responseHttpCode = null;
@@ -418,6 +420,26 @@ abstract class AbstractAPI implements Api
     }
 
     /**
+     * @return bool
+     */
+    public function getSslVerify()
+    {
+        return $this->sslVerify;
+    }
+
+    /**
+     * @param bool $sslVerify
+     *
+     * @return AbstractAPI
+     */
+    public function setSslVerify($sslVerify)
+    {
+        $this->sslVerify = (bool) $sslVerify;
+
+        return $this;
+    }
+
+    /**
      * @return PessoaContract
      */
     public function getBeneficiario()
@@ -652,15 +674,19 @@ abstract class AbstractAPI implements Api
 
         $curl = curl_init();
         curl_setopt($curl, CURLOPT_IPRESOLVE, CURL_IPRESOLVE_V4);
-        curl_setopt($curl, CURLOPT_SSL_VERIFYHOST, 2);
-        curl_setopt($curl, CURLOPT_SSL_VERIFYPEER, true);
+        curl_setopt($curl, CURLOPT_SSL_VERIFYHOST, $this->getSslVerify() ? 2 : 0);
+        curl_setopt($curl, CURLOPT_SSL_VERIFYPEER, $this->getSslVerify());
         curl_setopt($curl, CURLOPT_HEADER, 1);
         curl_setopt($curl, CURLOPT_RETURNTRANSFER, 1);
-        // curl_setopt($curl, CURLOPT_SSLCERT, $this->getCertificado());
-        // curl_setopt($curl, CURLOPT_SSLKEY, $this->getCertificadoChave());
-        // if ($senha = $this->getCertificadoSenha()) {
-        //     curl_setopt($curl, CURLOPT_KEYPASSWD, $senha);
-        // }
+        if ($cert = $this->getCertificado()) {
+            curl_setopt($curl, CURLOPT_SSLCERT, $cert);
+        }
+        if ($key = $this->getCertificadoChave()) {
+            curl_setopt($curl, CURLOPT_SSLKEY, $key);
+        }
+        if ($senha = $this->getCertificadoSenha()) {
+            curl_setopt($curl, CURLOPT_KEYPASSWD, $senha);
+        }
         curl_setopt($curl, CURLOPT_CAPATH, '/etc/ssl/certs/');
         curl_setopt($curl, CURLOPT_CUSTOMREQUEST, 'POST');
         $this->curl = $curl;
