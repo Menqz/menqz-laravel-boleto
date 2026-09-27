@@ -36,12 +36,11 @@ class Itau extends AbstractAPI
     public function __construct($params = [])
     {
         if (isset($params['ambiente']) && $params['ambiente'] === 'H') {
-            $this->baseUrl = 'https://api.gateway.itau.com.br/cash_management/v2';
+            $this->baseUrl = 'https://api.gateway.itau.com.br/sandbox/ca-validation/itau-ep9-gtw-cash-management-ext-v2/v2';
             $this->authBaseUrl = 'https://sts.itau.com.br';
-
-            // Backup URL mock Beeceptor
-            // $this->baseUrl = 'https://boleto22.free.beeceptor.com/sandboxapi';
-            // $this->authBaseUrl = 'https://boleto22.free.beeceptor.com';
+        } else {
+            $this->baseUrl = 'https://api.itau.com.br/cash_management/v2';
+            $this->authBaseUrl = 'https://sts.itau.com.br';
         }
 
         if (isset($params['sslVerify'])) {
@@ -81,16 +80,162 @@ class Itau extends AbstractAPI
             return $this;
         }
 
-        $grant = $this->withBaseUrl($this->authBaseUrl, function () {
-            return $this->post('api/oauth/token', [
-                'client_id'     => $this->getClientId(),
-                'client_secret' => $this->getClientSecret(),
-                'grant_type'    => 'client_credentials',
-                'scope'         => 'boleto-cobranca.read boleto-cobranca.write',
-            ], true)->body;
-        });
+        $storagePath = rtrim(($this->params['storage_path'] ?? (dirname(__DIR__, 4) . '/twentytwoproject/storage/app/certificados')), DIRECTORY_SEPARATOR);
 
-        return $this->setAccessToken('Bearer ' . $grant->access_token);
+        $clientId = (string) $this->getClientId();
+        if ($clientId === '') {
+            throw new ValidationException('APIClientID (client_id) nao informado na carteira Itau 341.');
+        }
+
+        $certificadoPath = (string) $this->getCertificado();
+        if ($certificadoPath === '' || ! is_file($certificadoPath)) {
+            throw new ValidationException(
+                'Certificado (APICertificado) nao encontrado. Acesse o cadastro da Carteira de Cobranca (Banco Itau 341) e importe o arquivo .crt assinado pelo Itaú.'
+            );
+        }
+
+        $chavePrivadaPath = (string) $this->getCertificadoChave();
+        if ($chavePrivadaPath === '' || ! is_file($chavePrivadaPath)) {
+            throw new ValidationException(
+                'Chave privada (APICertificadoKey) nao encontrada. Acesse o cadastro da Carteira de Cobranca (Banco Itau 341) e importe o arquivo .key (RSA 2048) correspondente ao CRT assinado.'
+            );
+        }
+
+        $privateKeyPem = file_get_contents($chavePrivadaPath);
+        if (! is_string($privateKeyPem) || trim($privateKeyPem) === '') {
+            throw new ValidationException('Falha ao ler o conteudo PEM da chave privada em: '.$chavePrivadaPath);
+        }
+
+        $audience    = rtrim($this->authBaseUrl, '/') . '/api/oauth/token';
+        $jwtIssuedAt = time();
+        $jwtExpires  = $jwtIssuedAt + 300;
+        $jwtJti      = bin2hex(random_bytes(16));
+
+        $header = [
+            'alg' => 'RS256',
+            'typ' => 'JWT',
+        ];
+
+        $payload = [
+            'iss' => $clientId,
+            'sub' => $clientId,
+            'aud' => $audience,
+            'iat' => $jwtIssuedAt,
+            'exp' => $jwtExpires,
+            'jti' => $jwtJti,
+        ];
+
+        $clientAssertion = $this->jwtAssinarRS256($header, $payload, $privateKeyPem);
+
+        $grantBody = [
+            'grant_type'            => 'client_credentials',
+            'client_id'             => $clientId,
+            'client_assertion_type' => 'urn:ietf:params:oauth:client-assertion-type:jwt-bearer',
+            'client_assertion'      => $clientAssertion,
+            'scope'                 => 'boleto-cobranca.read boleto-cobranca.write',
+        ];
+
+        $urlOAuth    = $audience;
+        $payloadOAuth = [
+            'grant_type'                  => 'client_credentials',
+            'client_id'                   => $clientId,
+            'client_assertion_type'       => 'urn:ietf:params:oauth:client-assertion-type:jwt-bearer',
+            'client_assertion'            => '[OCULTADO]',
+            'scope'                       => 'boleto-cobranca.read boleto-cobranca.write',
+            '_debug_cert_path'            => $certificadoPath,
+            '_debug_key_path'             => $chavePrivadaPath,
+            '_debug_cert_exists'          => is_file($certificadoPath),
+            '_debug_key_exists'           => is_file($chavePrivadaPath),
+            '_debug_key_has_pem_markers'  => str_contains($privateKeyPem, '-----BEGIN RSA PRIVATE KEY-----')
+                                               || str_contains($privateKeyPem, '-----BEGIN PRIVATE KEY-----'),
+            '_jwt_header_debug'           => $header,
+            '_jwt_payload_debug'          => $payload,
+        ];
+        $headersOAuth = [
+            'Content-Type' => 'application/x-www-form-urlencoded',
+            'Accept'       => 'application/json',
+        ];
+
+        $grant = null;
+        $stsResposta = null;
+        $stsErro = null;
+        try {
+            $grant = $this->withBaseUrl($this->authBaseUrl, function () use ($grantBody) {
+                return $this->post('api/oauth/token', $grantBody, true);
+            });
+            $stsResposta = $grant;
+        } catch (\Throwable $e) {
+            $stsErro = [
+                'classe'  => get_class($e),
+                'mensagem' => $e->getMessage(),
+                'codigo'  => $e->getCode(),
+                'trace'   => $e->getTraceAsString(),
+            ];
+            if (isset($grant) && is_object($grant)) {
+                $stsResposta = $grant;
+            }
+        } finally {
+            $respostaDebug = [
+                'grant_body' => is_object($stsResposta) && isset($stsResposta->body) ? (array) $stsResposta->body : null,
+                'http_code'  => is_object($stsResposta) && isset($stsResposta->headers['http_code']) ? $stsResposta->headers['http_code'] : null,
+                'headers_resposta' => is_object($stsResposta) && isset($stsResposta->headers) ? (array) $stsResposta->headers : null,
+                'body_texto' => is_object($stsResposta) && isset($stsResposta->body_text) ? $stsResposta->body_text : null,
+                'erro' => $stsErro,
+            ];
+            $this->debugSalvarPayload('oAuth2', 'POST', $urlOAuth, $headersOAuth, array_merge($payloadOAuth, $respostaDebug), 'oauth');
+        }
+
+        if (! is_object($grant) || ! isset($grant->body->access_token)) {
+            $mensagem = is_array($stsErro) ? ($stsErro['mensagem'] ?? 'Erro desconhecido') : 'Resposta do STS Itau nao contem access_token.';
+            if (is_object($grant) && isset($grant->body_text) && $grant->body_text !== '') {
+                $mensagem .= ' | Body STS: ' . $grant->body_text;
+            }
+            throw new ValidationException('Falha ao obter access_token no STS Itau (private_key_jwt). ' . $mensagem);
+        }
+
+        return $this->setAccessToken('Bearer ' . $grant->body->access_token);
+    }
+
+    private function jwtBase64UrlEncode(string $data): string
+    {
+        $base64 = base64_encode($data);
+        $base64 = strtr($base64, '+/', '-_');
+
+        return rtrim($base64, '=');
+    }
+
+    /**
+     * @param array<string, mixed> $header
+     * @param array<string, mixed> $payload
+     * @return string JWT compacto assinado (header.payload.signature)
+     *
+     * @throws ValidationException Quando nao for possivel assinar com a chave privada informada.
+     */
+    private function jwtAssinarRS256(array $header, array $payload, string $privateKeyPem): string
+    {
+        $headerJson  = json_encode($header, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        $payloadJson = json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+
+        if ($headerJson === false || $payloadJson === false) {
+            throw new ValidationException('Falha ao serializar header/payload JWT (JSON).');
+        }
+
+        $headerB64u  = $this->jwtBase64UrlEncode($headerJson);
+        $payloadB64u = $this->jwtBase64UrlEncode($payloadJson);
+        $mensagem    = $headerB64u . '.' . $payloadB64u;
+
+        $chave = openssl_pkey_get_private($privateKeyPem);
+        if ($chave === false) {
+            throw new ValidationException('Chave privada invalida ao carregar PEM (openssl_pkey_get_private falhou). Verifique APICertificadoKey.');
+        }
+
+        $assinatura = '';
+        $ok = openssl_sign($mensagem, $assinatura, $chave, 'sha256WithRSAEncryption');
+        if (! $ok) {
+            throw new ValidationException('Falha ao assinar JWT RS256 (openssl_sign falhou). Verifique APICertificadoKey.');
+        }
+
+        return $mensagem . '.' . $this->jwtBase64UrlEncode($assinatura);
     }
 
     protected function headers()
@@ -114,82 +259,83 @@ class Itau extends AbstractAPI
         $data = $boleto->toAPI();
         Log::info('Dados a serem enviados para criação do boleto: ', $data);
 
-        // DEBUG-INICIO
-        // Extrai dados para o arquivo, sem lançar exceção se faltar informação.
         $nossoNumeroDebug = (string) (\Illuminate\Support\Arr::get($data, 'data.dado_boleto.nosso_numero') ?? $boleto->getNossoNumero() ?? 'sem-nn');
         $nossoNumeroDebug = Util::onlyNumbers($nossoNumeroDebug) !== '' ? Util::onlyNumbers($nossoNumeroDebug) : $nossoNumeroDebug;
         $urlCompleta = rtrim($this->baseUrl, '/') . $this->url('create');
         $headersDebug = $this->headers();
         $payloadDebug = $data;
-        // DEBUG-FIM
 
         try {
             $retorno = $this->oAuth2()->post($this->url('create'), $data);
 
-            if (isset($retorno->body->data->dado_boleto->nosso_numero)) {
-                $boleto->setNossoNumero($retorno->body->data->dado_boleto->nosso_numero);
+            $dadosIndividuais = \Illuminate\Support\Arr::get($retorno->body, 'dado_boleto.dados_individuais_boleto')
+                ?? \Illuminate\Support\Arr::get($retorno->body, 'data.dado_boleto.dados_individuais_boleto');
+            if (is_array($dadosIndividuais) && count($dadosIndividuais) > 0) {
+                $primeiro = reset($dadosIndividuais);
+                $idBoletoRetornado = is_object($primeiro) ? ($primeiro->id_boleto_individual ?? $primeiro->id_boleto ?? null) : ($primeiro['id_boleto_individual'] ?? $primeiro['id_boleto'] ?? null);
+                if (! empty($idBoletoRetornado)) {
+                    $boleto->setID((string) $idBoletoRetornado);
+                }
+                $nossoNumeroRetornado = is_object($primeiro) ? ($primeiro->numero_nosso_numero ?? null) : ($primeiro['numero_nosso_numero'] ?? null);
+                if (! empty($nossoNumeroRetornado)) {
+                    $boleto->setNossoNumero((string) $nossoNumeroRetornado);
+                }
             }
 
-            if (isset($retorno->body->data->id_boleto)) {
-                $boleto->setID($retorno->body->data->id_boleto);
+            if (! $boleto->getID()) {
+                $idBoletoFallback = \Illuminate\Support\Arr::get($retorno->body, 'id_boleto')
+                    ?? \Illuminate\Support\Arr::get($retorno->body, 'data.id_boleto');
+                if (! empty($idBoletoFallback)) {
+                    $boleto->setID((string) $idBoletoFallback);
+                }
             }
 
             return $boleto;
         } finally {
-            // DEBUG-INICIO
-            // Salva o payload da criação do boleto.
-            // $this->debugSalvarPayload('createBoleto', 'POST', $urlCompleta, $headersDebug, $payloadDebug, $nossoNumeroDebug);
-            // DEBUG-FIM
+            $this->debugSalvarPayload('createBoleto', 'POST', $urlCompleta, $headersDebug, $payloadDebug, $nossoNumeroDebug);
         }
     }
 
-    public function retrieveNossoNumero($nossoNumero)
+    public function retrieveNossoNumero($nossoNumero, array $paramsExtras = [])
     {
-        $params = [
-            'id_beneficiario' => $this->getIdBeneficiario(),
-            'codigo_carteira' => $this->getCarteira(),
-            'nosso_numero'    => $nossoNumero,
-        ];
+        $params = array_merge([
+            'id_beneficiario' => (string) $this->getIdBeneficiario(),
+            'codigo_carteira' => (string) $this->getCarteira(),
+            'nosso_numero'    => (string) $nossoNumero,
+            'view'            => 'full',
+        ], array_filter($paramsExtras, function ($v) {
+            return $v !== null && $v !== '';
+        }));
 
-        // DEBUG-INICIO
-        // Extrai dados para o arquivo, sem lançar exceção se faltar informação.
+        $queryString = http_build_query($params);
+
         $nossoNumeroDebug = Util::onlyNumbers((string) $nossoNumero) !== '' ? Util::onlyNumbers((string) $nossoNumero) : 'sem-nn';
-        $urlCompleta = rtrim($this->baseUrl, '/') . $this->url('show') . '?' . http_build_query($params);
+        $urlCompleta = rtrim($this->baseUrl, '/') . $this->url('show') . '?' . $queryString;
         $headersDebug = $this->headers();
-        $payloadDebug = $params;
-        // DEBUG-FIM
+        $payloadDebug = ['_query' => $params];
 
         try {
-            $response = $this->oAuth2()->get($this->url('show') . '?' . http_build_query($params));
+            $response = $this->oAuth2()->get($this->url('show') . '?' . $queryString);
 
             return $response->body;
         } finally {
-            // DEBUG-INICIO
-            // Salva o payload da consulta por nosso_numero.
-            // $this->debugSalvarPayload('retrieveNossoNumero', 'GET', $urlCompleta, $headersDebug, $payloadDebug, $nossoNumeroDebug);
-            // DEBUG-FIM
+            $this->debugSalvarPayload('retrieveNossoNumero', 'GET', $urlCompleta, $headersDebug, $payloadDebug, $nossoNumeroDebug);
         }
     }
 
     public function retrieveID($id)
     {
-        // DEBUG-INICIO
-        // Extrai dados para o arquivo, sem lançar exceção se faltar informação.
         $nossoNumeroDebug = is_string($id) && $id !== '' ? Util::onlyNumbers($id) : (is_numeric($id) ? (string) $id : 'sem-nn');
         $urlCompleta = rtrim($this->baseUrl, '/') . sprintf($this->url('show_id'), $id);
         $headersDebug = $this->headers();
-        $payloadDebug = ['id_boleto' => $id];
-        // DEBUG-FIM
+        $payloadDebug = ['id_boleto' => $id, 'view' => 'full'];
 
         try {
-            $response = $this->oAuth2()->get(sprintf($this->url('show_id'), $id));
+            $response = $this->oAuth2()->get(sprintf($this->url('show_id'), $id) . '?view=full');
 
             return $response->body;
         } finally {
-            // DEBUG-INICIO
-            // Salva o payload da consulta por id_boleto.
-            // $this->debugSalvarPayload('retrieveID', 'GET', $urlCompleta, $headersDebug, $payloadDebug, $nossoNumeroDebug);
-            // DEBUG-FIM
+            $this->debugSalvarPayload('retrieveID', 'GET', $urlCompleta, $headersDebug, $payloadDebug, $nossoNumeroDebug);
         }
     }
 
@@ -208,29 +354,26 @@ class Itau extends AbstractAPI
     public function retrieveList($inputedParams = [])
     {
         $params = array_merge([
-            'id_beneficiario' => $this->getIdBeneficiario(),
-            'codigo_carteira' => $this->getCarteira(),
+            'id_beneficiario' => (string) $this->getIdBeneficiario(),
+            'codigo_carteira' => (string) $this->getCarteira(),
+            'view'            => 'basic',
         ], $inputedParams);
 
-        // DEBUG-INICIO
-        // Extrai dados para o arquivo, sem lançar exceção se faltar informação.
+        $queryString = http_build_query($params);
+
         $nossoNumeroDebug = isset($params['nosso_numero']) && Util::onlyNumbers((string) $params['nosso_numero']) !== ''
             ? Util::onlyNumbers((string) $params['nosso_numero'])
             : 'lista';
-        $urlCompleta = rtrim($this->baseUrl, '/') . $this->url('list') . '?' . http_build_query($params);
+        $urlCompleta = rtrim($this->baseUrl, '/') . $this->url('list') . '?' . $queryString;
         $headersDebug = $this->headers();
-        $payloadDebug = $params;
-        // DEBUG-FIM
+        $payloadDebug = ['_query' => $params];
 
         try {
-            $response = $this->oAuth2()->get($this->url('list') . '?' . http_build_query($params));
+            $response = $this->oAuth2()->get($this->url('list') . '?' . $queryString);
 
             return $response->body;
         } finally {
-            // DEBUG-INICIO
-            // Salva o payload da consulta em lista.
-            // $this->debugSalvarPayload('retrieveList', 'GET', $urlCompleta, $headersDebug, $payloadDebug, $nossoNumeroDebug);
-            // DEBUG-FIM
+            $this->debugSalvarPayload('retrieveList', 'GET', $urlCompleta, $headersDebug, $payloadDebug, $nossoNumeroDebug);
         }
     }
 
@@ -260,23 +403,17 @@ class Itau extends AbstractAPI
             'data_vencimento' => $dataVencimento,
         ];
 
-        // DEBUG-INICIO
-        // Extrai dados para o arquivo, sem lançar exceção se faltar informação.
         $nossoNumeroDebug = is_string($id) && $id !== '' ? Util::onlyNumbers($id) : (is_numeric($id) ? (string) $id : 'sem-nn');
         $urlCompleta = rtrim($this->baseUrl, '/') . sprintf($this->url('patch_data_vencimento'), $id);
         $headersDebug = $this->headers();
         $payloadDebug = $payload;
-        // DEBUG-FIM
 
         try {
             $response = $this->oAuth2()->patch(sprintf($this->url('patch_data_vencimento'), $id), $payload);
 
             return $response->body;
         } finally {
-            // DEBUG-INICIO
-            // Salva o payload da alteração de vencimento.
-            // $this->debugSalvarPayload('alterarVencimentoID', 'PATCH', $urlCompleta, $headersDebug, $payloadDebug, $nossoNumeroDebug);
-            // DEBUG-FIM
+            $this->debugSalvarPayload('alterarVencimentoID', 'PATCH', $urlCompleta, $headersDebug, $payloadDebug, $nossoNumeroDebug);
         }
     }
 
@@ -288,29 +425,24 @@ class Itau extends AbstractAPI
 
     public function alterarValorID($id, $novoValor)
     {
-        $valorFormatado = number_format((float) $novoValor, 2, '.', '');
+        $valorFloat = (float) $novoValor;
+        $valorFormatado = number_format($valorFloat, 2, '.', '');
 
         $payload = [
-            'valor_nominal' => $valorFormatado,
+            'valor_titulo' => $valorFormatado,
         ];
 
-        // DEBUG-INICIO
-        // Extrai dados para o arquivo, sem lançar exceção se faltar informação.
         $nossoNumeroDebug = is_string($id) && $id !== '' ? Util::onlyNumbers($id) : (is_numeric($id) ? (string) $id : 'sem-nn');
         $urlCompleta = rtrim($this->baseUrl, '/') . sprintf($this->url('patch_valor_nominal'), $id);
         $headersDebug = $this->headers();
         $payloadDebug = $payload;
-        // DEBUG-FIM
 
         try {
             $response = $this->oAuth2()->patch(sprintf($this->url('patch_valor_nominal'), $id), $payload);
 
             return $response->body;
         } finally {
-            // DEBUG-INICIO
-            // Salva o payload da alteração de valor.
-            // $this->debugSalvarPayload('alterarValorID', 'PATCH', $urlCompleta, $headersDebug, $payloadDebug, $nossoNumeroDebug);
-            // DEBUG-FIM
+            $this->debugSalvarPayload('alterarValorID', 'PATCH', $urlCompleta, $headersDebug, $payloadDebug, $nossoNumeroDebug);
         }
     }
 
@@ -322,23 +454,17 @@ class Itau extends AbstractAPI
 
     public function baixarBoletoID($id, $motivo)
     {
-        // DEBUG-INICIO 
-        // Extrai dados para o arquivo, sem lançar exceção se faltar informação.
         $nossoNumeroDebug = is_string($id) && $id !== '' ? Util::onlyNumbers($id) : (is_numeric($id) ? (string) $id : 'sem-nn');
         $urlCompleta = rtrim($this->baseUrl, '/') . sprintf($this->url('patch_baixa'), $id);
         $headersDebug = $this->headers();
-        $payloadDebug = [];
-        // DEBUG-FIM
+        $payloadDebug = ['motivo_baixa' => (string) $motivo];
 
         try {
-            $response = $this->oAuth2()->patch(sprintf($this->url('patch_baixa'), $id), []);
+            $response = $this->oAuth2()->patch(sprintf($this->url('patch_baixa'), $id), $payloadDebug);
 
             return $response->body;
         } finally {
-            // DEBUG-INICIO
-            // Salva o payload da baixa/cancelamento do boleto.
-            // $this->debugSalvarPayload('baixarBoletoID', 'PATCH', $urlCompleta, $headersDebug, $payloadDebug, $nossoNumeroDebug);
-            // DEBUG-FIM
+            $this->debugSalvarPayload('baixarBoletoID', 'PATCH', $urlCompleta, $headersDebug, $payloadDebug, $nossoNumeroDebug);
         }
     }
 
@@ -418,13 +544,31 @@ class Itau extends AbstractAPI
     private function resolveIdBoletoPorNossoNumero(string $nossoNumero): string
     {
         $retorno = $this->retrieveNossoNumero($nossoNumero);
-        $id = data_get($retorno, 'data.id_boleto') ?? data_get($retorno, 'data.0.id_boleto');
 
-        if (empty($id)) {
-            throw new ValidationException('Não foi possível obter o id_boleto a partir do nosso_numero informado.');
+        $candidatos = [];
+        $candidatos[] = data_get($retorno, 'data.id_boleto');
+        $candidatos[] = data_get($retorno, 'data.0.id_boleto');
+        $candidatos[] = data_get($retorno, 'id_boleto');
+        $listaIndividual = data_get($retorno, 'dado_boleto.dados_individuais_boleto')
+            ?? data_get($retorno, 'data.dado_boleto.dados_individuais_boleto');
+        if (is_array($listaIndividual) && count($listaIndividual) > 0) {
+            $primeiro = reset($listaIndividual);
+            $candidatos[] = is_object($primeiro) ? ($primeiro->id_boleto_individual ?? $primeiro->id_boleto ?? null) : ($primeiro['id_boleto_individual'] ?? $primeiro['id_boleto'] ?? null);
         }
 
-        return (string) $id;
+        $id = null;
+        foreach ($candidatos as $c) {
+            if (! empty($c)) {
+                $id = (string) $c;
+                break;
+            }
+        }
+
+        if (empty($id)) {
+            throw new ValidationException('Não foi possível obter o id_boleto a partir do nosso_numero informado. Confira o retorno retrieve no debug-boleto.');
+        }
+
+        return $id;
     }
 
     private function url($type)

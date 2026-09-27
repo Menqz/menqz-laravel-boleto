@@ -265,13 +265,14 @@ class Itau extends AbstractBoleto implements BoletoAPIContract
         $dadoBoleto = Arr::get($data, 'data.dado_boleto') ?? Arr::get($data, 'data.0.dado_boleto') ?? $data;
         $dataEnvelope = Arr::get($data, 'data') ?? $data;
 
-        // Mapeamento de situação retornado pela API para constantes SITUACAO_*.
         $aSituacao = [
             // Situações de pagamento
             'PAGO' => AbstractBoleto::SITUACAO_PAGO,
             'LIQUIDADO' => AbstractBoleto::SITUACAO_PAGO,
             'LIQUIDACAO_NORMAL' => AbstractBoleto::SITUACAO_PAGO,
             '06' => AbstractBoleto::SITUACAO_PAGO,
+            'PAGO_PARCIAL' => AbstractBoleto::SITUACAO_PAGO_PARCIAL,
+            'PAGOPARCIAL' => AbstractBoleto::SITUACAO_PAGO_PARCIAL,
 
             // Situações baixada/cancelada
             'BAIXADO' => AbstractBoleto::SITUACAO_BAIXADO,
@@ -286,9 +287,13 @@ class Itau extends AbstractBoleto implements BoletoAPIContract
             // Situações de entrada confirmada / aberto / alterado permanecem aberto
             'ABERTO' => AbstractBoleto::SITUACAO_ABERTO,
             'EM_ABERTO' => AbstractBoleto::SITUACAO_ABERTO,
+            'EMABERTO' => AbstractBoleto::SITUACAO_ABERTO,
             'REGISTRADO' => AbstractBoleto::SITUACAO_ABERTO,
+            'EM_SER' => AbstractBoleto::SITUACAO_ABERTO,
+            'EMSER' => AbstractBoleto::SITUACAO_ABERTO,
             'ENTRADA_CONFIRMADA' => AbstractBoleto::SITUACAO_ABERTO,
             'VENCIDO' => AbstractBoleto::SITUACAO_ABERTO,
+            'EXPIRADO' => AbstractBoleto::SITUACAO_ABERTO,
             '02' => AbstractBoleto::SITUACAO_ABERTO,
             '14' => AbstractBoleto::SITUACAO_ABERTO,
 
@@ -298,11 +303,28 @@ class Itau extends AbstractBoleto implements BoletoAPIContract
         ];
 
         $situacaoBruta = strtoupper((string) (
-            Arr::get($dadoBoleto, 'codigo_situacao')
+            Arr::get($dadoBoleto, 'situacao_geral_boleto')
+            ?? Arr::get($dataEnvelope, 'situacao_geral_boleto')
+            ?? Arr::get($dadoBoleto, 'codigo_situacao')
             ?? Arr::get($dadoBoleto, 'situacao')
             ?? Arr::get($dataEnvelope, 'situacao')
+            ?? Arr::get($dadoBoleto, 'status_vencimento')
+            ?? Arr::get($dataEnvelope, 'status_vencimento')
             ?? ''
         ));
+
+        if ($situacaoBruta === '' && ! empty(Arr::get($dadoBoleto, 'pagamentos_cobranca'))) {
+            $situacaoBruta = 'LIQUIDADO';
+        }
+        if ($situacaoBruta === '' && ! empty(Arr::get($dadoBoleto, 'baixa'))) {
+            $motivo = strtoupper((string) Arr::get($dadoBoleto, 'baixa.motivo_baixa', ''));
+            if (stripos($motivo, 'CANCEL') !== false) {
+                $situacaoBruta = 'CANCELADO';
+            } else {
+                $situacaoBruta = 'BAIXADO';
+            }
+        }
+
         $situacao = $aSituacao[$situacaoBruta] ?? AbstractBoleto::SITUACAO_ABERTO;
 
         // Datas
@@ -371,6 +393,34 @@ class Itau extends AbstractBoleto implements BoletoAPIContract
             ?? Arr::get($dadoBoleto, 'valor_pago')
             ?? Arr::get($dadoBoleto, 'valor_recebido')
         ) ?? 0;
+        if ($valorRecebido == 0) {
+            $listaPagamentos = Arr::get($dadoBoleto, 'pagamentos_cobranca');
+            if (is_array($listaPagamentos) && count($listaPagamentos) > 0) {
+                $totalPago = 0;
+                $dataPg = null;
+                foreach ($listaPagamentos as $pg) {
+                    $v = $toFloat(
+                        Arr::get($pg, 'valor_pago_total_cobranca')
+                        ?? Arr::get($pg, 'valor_total_recebimento')
+                        ?? Arr::get($pg, 'valor_pago')
+                    );
+                    if ($v > 0) {
+                        $totalPago += $v;
+                    }
+                    if (! $dataPg) {
+                        $dataPg = Arr::get($pg, 'data_inclusao_pagamento')
+                            ?? Arr::get($pg, 'data_pagamento')
+                            ?? Arr::get($pg, 'data');
+                    }
+                }
+                if ($totalPago > 0) {
+                    $valorRecebido = $totalPago;
+                }
+                if (! $dataQuitacao && $dataPg) {
+                    $dataQuitacao = $parseDate($dataPg);
+                }
+            }
+        }
 
         $valorMora = $toFloat(
             Arr::get($dadoBoleto, 'valor_juros_mora')
@@ -405,8 +455,20 @@ class Itau extends AbstractBoleto implements BoletoAPIContract
         $idBoleto = (string) (
             Arr::get($dataEnvelope, 'id_boleto')
             ?? Arr::get($dadoBoleto, 'id_boleto')
+            ?? Arr::get(Arr::get((array) (Arr::get($dadoBoleto, 'dados_individuais_boleto') ?? []), '0'), 'id_boleto_individual')
+            ?? Arr::get(Arr::get((array) (Arr::get($dadoBoleto, 'dados_individuais_boleto') ?? []), '0'), 'id_boleto')
             ?? ''
         );
+
+        if ($idBoleto === '' && is_array(Arr::get($dataEnvelope, '0', null))) {
+            $idBoleto = (string) Arr::get($dataEnvelope, '0.id_boleto', '');
+            if ($idBoleto === '') {
+                $individual = Arr::get($dataEnvelope, '0.dado_boleto.dados_individuais_boleto.0');
+                if ($individual) {
+                    $idBoleto = (string) (is_object($individual) ? ($individual->id_boleto_individual ?? $individual->id_boleto ?? '') : ($individual['id_boleto_individual'] ?? $individual['id_boleto'] ?? ''));
+                }
+            }
+        }
 
         // Pagador
         $pessoaPagador = Arr::get($dadoBoleto, 'pagador.pessoa')
