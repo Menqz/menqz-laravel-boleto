@@ -3,16 +3,21 @@
 namespace Eduardokum\LaravelBoleto\Api\Banco;
 
 use DateTimeInterface;
+use DateTimeImmutable;
 use Illuminate\Support\Arr;
 use Illuminate\Support\Str;
 use Eduardokum\LaravelBoleto\Api\AbstractAPI;
+use Eduardokum\LaravelBoleto\Api\DTO\CertificadoRenovado;
+use Eduardokum\LaravelBoleto\Contracts\Api\CertificadoRenovavel;
 use Eduardokum\LaravelBoleto\Exception\ValidationException;
 use Eduardokum\LaravelBoleto\Boleto\Banco\Itau as BoletoItau;
 use Eduardokum\LaravelBoleto\Contracts\Boleto\BoletoAPI as BoletoAPIContract;
 use Eduardokum\LaravelBoleto\Util;
+use Eduardokum\LaravelBoleto\Util\CertificateUtil;
 use Illuminate\Support\Facades\Log;
+use Throwable;
 
-class Itau extends AbstractAPI
+class Itau extends AbstractAPI implements CertificadoRenovavel
 {
     protected $baseUrl = 'https://api.itau.com.br/cash_management/v2';
 
@@ -21,6 +26,12 @@ class Itau extends AbstractAPI
     protected $id_beneficiario = null;
 
     protected $carteira = null;
+
+    protected $ou_app_certificado = null;
+
+    protected $cidade_empresa = null;
+
+    protected $uf_empresa = null;
 
     protected $camposObrigatorios = [
         // 'certificado',
@@ -47,6 +58,24 @@ class Itau extends AbstractAPI
             $this->setSslVerify($params['sslVerify']);
         }
 
+        if (isset($params['ou_app_certificado']) && $params['ou_app_certificado'] !== '') {
+            $this->setOuAppCertificado($params['ou_app_certificado']);
+        } elseif (isset($params['ouAppCertificado']) && $params['ouAppCertificado'] !== '') {
+            $this->setOuAppCertificado($params['ouAppCertificado']);
+        }
+
+        if (isset($params['cidade_empresa']) && $params['cidade_empresa'] !== '') {
+            $this->setCidadeEmpresa($params['cidade_empresa']);
+        } elseif (isset($params['cidadeEmpresa']) && $params['cidadeEmpresa'] !== '') {
+            $this->setCidadeEmpresa($params['cidadeEmpresa']);
+        }
+
+        if (isset($params['uf_empresa']) && $params['uf_empresa'] !== '') {
+            $this->setUfEmpresa($params['uf_empresa']);
+        } elseif (isset($params['ufEmpresa']) && $params['ufEmpresa'] !== '') {
+            $this->setUfEmpresa($params['ufEmpresa']);
+        }
+
         parent::__construct($params);
     }
 
@@ -70,6 +99,42 @@ class Itau extends AbstractAPI
     public function setCarteira($carteira)
     {
         $this->carteira = $carteira;
+
+        return $this;
+    }
+
+    public function getOuAppCertificado()
+    {
+        return $this->ou_app_certificado;
+    }
+
+    public function setOuAppCertificado($ouAppCertificado)
+    {
+        $this->ou_app_certificado = $ouAppCertificado;
+
+        return $this;
+    }
+
+    public function getCidadeEmpresa()
+    {
+        return $this->cidade_empresa;
+    }
+
+    public function setCidadeEmpresa($cidadeEmpresa)
+    {
+        $this->cidade_empresa = $cidadeEmpresa;
+
+        return $this;
+    }
+
+    public function getUfEmpresa()
+    {
+        return $this->uf_empresa;
+    }
+
+    public function setUfEmpresa($ufEmpresa)
+    {
+        $this->uf_empresa = $ufEmpresa;
 
         return $this;
     }
@@ -592,6 +657,7 @@ class Itau extends AbstractAPI
             'patch_sacador_avalista'       => '/boletos/%s/sacador_avalista',
             'patch_recebimento_divergente' => '/boletos/%s/recebimento_divergente',
             'patch_abatimento'             => '/boletos/%s/abatimento',
+            'renovacao'                    => '/seguranca/v2/certificado/renovacao',
             default => throw new ValidationException("URL tipo $type não definida"),
         };
     }
@@ -606,6 +672,370 @@ class Itau extends AbstractAPI
         } finally {
             $this->baseUrl = $oldBaseUrl;
         }
+    }
+
+    public function suportaRenovacaoAutomatica(): bool
+    {
+        return true;
+    }
+
+    public function extrairValidadeCertificado(): ?DateTimeInterface
+    {
+        $crtInput = (string) $this->getCertificado();
+        if ($crtInput === '') {
+            return null;
+        }
+
+        $data = CertificateUtil::extrairValidadeCertificado($crtInput);
+        if (! $data instanceof DateTimeImmutable) {
+            return null;
+        }
+
+        return $data;
+    }
+
+    public function renovarCertificado(array $params = []): CertificadoRenovado
+    {
+        $this->validarCamposObrigatoriosRenovacao();
+        $this->validarJanela30DiasItau();
+
+        $novaChavePrivadaPem = CertificateUtil::gerarChavePrivadaRSA2048Pem();
+
+        $clientId   = trim((string) $this->getClientId());
+        $ouApp      = trim((string) ($this->getOuAppCertificado() ?? 'SISTEMA-COBRANCA'));
+        $cidade     = trim((string) ($this->getCidadeEmpresa() ?? 'SAO PAULO'));
+        $uf         = strtoupper(trim((string) ($this->getUfEmpresa() ?? 'SP')));
+
+        if ($ouApp === '') {
+            $ouApp = 'SISTEMA-COBRANCA';
+        }
+        if ($cidade === '') {
+            $cidade = 'SAO PAULO';
+        }
+        if (strlen($uf) !== 2) {
+            $uf = 'SP';
+        }
+
+        $novoCsrPem = CertificateUtil::gerarCSR(
+            $clientId,
+            $ouApp,
+            $cidade,
+            $uf,
+            'BR',
+            $novaChavePrivadaPem,
+            'sha512',
+        );
+
+        $cnExtraido = (string) CertificateUtil::extrairCNDoCSR($novoCsrPem);
+        if ($cnExtraido !== $clientId) {
+            throw new ValidationException(sprintf(
+                'CN do CSR gerado (valor: "%s") difere do client_id da carteira (valor: "%s"). Abortando renovação antes de chamar a API Itaú.',
+                $cnExtraido,
+                $clientId,
+            ));
+        }
+
+        $this->oAuth2();
+        $accessTokenBruto = (string) $this->getAccessToken();
+        $accessTokenLimpo = preg_replace('/^Bearer\s+/i', '', $accessTokenBruto) ?? $accessTokenBruto;
+        if ($accessTokenLimpo === '') {
+            throw new ValidationException('Não foi possível obter access_token STS válido para a renovação de certificado.');
+        }
+
+        $headers = [
+            'Authorization' => 'Bearer ' . $accessTokenLimpo,
+            'Content-Type'  => 'text/plain',
+            'x-itau-force-cert' => 'true',
+        ];
+
+        $endpointPath = $this->url('renovacao');
+        $requestId    = (string) Str::uuid();
+        $urlCompleta  = rtrim($this->authBaseUrl, '/') . $endpointPath;
+        $headersDebug = array_merge($headers, [
+            'Authorization' => 'Bearer [OCULTADO]',
+        ]);
+        $payloadDebug = [
+            'request_id'            => $requestId,
+            'client_id'             => $clientId,
+            'ou_app'                => $ouApp,
+            'cidade'                => $cidade,
+            'uf'                    => $uf,
+            'cn_cliente'            => $clientId,
+            'cn_csr_gerado'         => $cnExtraido,
+            'cn_corresponde'        => $cnExtraido === $clientId,
+            'csr_pem_resumo_sha256' => hash('sha256', $novoCsrPem),
+            'chave_privada_sha256'  => hash('sha256', $novaChavePrivadaPem),
+        ];
+
+        try {
+            $resposta = $this->withBaseUrl($this->authBaseUrl, function () use ($endpointPath, $novoCsrPem, $headers) {
+                return $this->postRawTextInterno($endpointPath, $novoCsrPem, $headers);
+            });
+
+            $httpCode = is_object($resposta) && isset($resposta->headers['http_code'])
+                ? (int) $resposta->headers['http_code']
+                : 0;
+
+            $bodyRaw = is_object($resposta) && isset($resposta->body_text)
+                ? (string) $resposta->body_text
+                : '';
+
+            $payloadDebug['response_http_code'] = $httpCode;
+            $payloadDebug['response_body_raw']  = $bodyRaw;
+
+            if ($httpCode < 200 || $httpCode >= 300) {
+                $mensagemErro = "Falha na renovação de certificado Itaú (HTTP $httpCode).";
+                if ($bodyRaw !== '') {
+                    $mensagemErro .= ' | Body: ' . substr($bodyRaw, 0, 800);
+                }
+                throw new ValidationException($mensagemErro, $httpCode);
+            }
+
+            if (trim($bodyRaw) === '') {
+                throw new ValidationException('Resposta da API Itaú de renovação veio vazia. HTTP 200 mas sem conteúdo CRT.');
+            }
+
+            $novoCrtPem = $this->parseExtrairCRTResponse($bodyRaw);
+
+            if (! CertificateUtil::validarPEMCertificado($novoCrtPem)) {
+                throw new ValidationException('O certificado retornado pela API Itaú não foi reconhecido como PEM válido após parse.');
+            }
+
+            $validadeAtual = $this->extrairValidadeCertificado();
+            $validadeNova  = CertificateUtil::extrairValidadeCertificado($novoCrtPem);
+            if ($validadeNova === null) {
+                throw new ValidationException('Não foi possível extrair data de validade do NOVO certificado Itaú.');
+            }
+            if ($validadeAtual !== null && $validadeNova->getTimestamp() <= $validadeAtual->getTimestamp()) {
+                throw new ValidationException(sprintf(
+                    'O novo certificado não renovou a validade (até: %s vs antigo até: %s).',
+                    $validadeNova->format('Y-m-d H:i:s'),
+                    $validadeAtual->format('Y-m-d H:i:s'),
+                ));
+            }
+
+            $payloadDebug['validade_nova']        = $validadeNova->format(DateTimeInterface::RFC3339);
+            $payloadDebug['validade_nova_unix']   = $validadeNova->getTimestamp();
+            if ($validadeAtual !== null) {
+                $payloadDebug['validade_anterior']    = $validadeAtual->format(DateTimeInterface::RFC3339);
+                $payloadDebug['dias_renovados']       = (int) ceil(($validadeNova->getTimestamp() - $validadeAtual->getTimestamp()) / 86400);
+            }
+            $payloadDebug['tipo_fluxo'] = 'v2-renovacao';
+
+            return new CertificadoRenovado(
+                $novoCrtPem,
+                $novaChavePrivadaPem,
+                null,
+                $validadeNova,
+                'v2-renovacao',
+                [
+                    'http_code'   => $httpCode,
+                    'request_id'  => $requestId,
+                    'body_raw'    => $bodyRaw,
+                    'validade_original' => $validadeAtual !== null ? $validadeAtual->getTimestamp() : null,
+                ],
+            );
+        } finally {
+            $this->debugSalvarPayload('renovarCertificadoV2', 'POST', $urlCompleta, $headersDebug, $payloadDebug, 'renovacao-'. substr($requestId, 0, 8));
+        }
+    }
+
+    private function validarCamposObrigatoriosRenovacao(): void
+    {
+        $campos = [];
+        if (trim((string) $this->getClientId()) === '') {
+            $campos[] = 'APIClientID (client_id)';
+        }
+
+        $crt = (string) $this->getCertificado();
+        if ($crt === '') {
+            $campos[] = 'APICertificado (certificado .crt atual)';
+        } elseif (strlen($crt) <= 1024 && ! is_file($crt)) {
+            $campos[] = "APICertificado (path informado não existe arquivo: '$crt')";
+        }
+
+        $key = (string) $this->getCertificadoChave();
+        if ($key === '') {
+            $campos[] = 'APICertificadoKey (chave privada .key atual)';
+        } elseif (strlen($key) <= 1024 && ! is_file($key)) {
+            $campos[] = "APICertificadoKey (path informado não existe arquivo: '$key')";
+        }
+
+        if ($campos !== []) {
+            throw new ValidationException('Campos obrigatórios ausentes para renovação de certificado Itaú 341: ' . implode(', ', $campos) . '.');
+        }
+    }
+
+    private function validarJanela30DiasItau(): void
+    {
+        $validadeAtual = $this->extrairValidadeCertificado();
+        if ($validadeAtual === null) {
+            return;
+        }
+
+        $agora = new DateTimeImmutable();
+        $limite30Dias = $agora->modify('+30 days');
+        if ($validadeAtual > $limite30Dias) {
+            $diasRestantes = CertificateUtil::calcularDiasAteVencer($validadeAtual, $agora);
+            throw new ValidationException(sprintf(
+                'API Itaú v2 só permite renovação 30 dias antes do vencimento (atual falta %d dias). Válido a partir de %s. Vencimento atual do certificado: %s.',
+                $diasRestantes,
+                $limite30Dias->format('Y-m-d'),
+                $validadeAtual->format('Y-m-d'),
+            ));
+        }
+    }
+
+    private function parseExtrairCRTResponse(string $bodyRaw): string
+    {
+        $bodyRaw = trim($bodyRaw);
+        if ($bodyRaw === '') {
+            throw new ValidationException('Body de resposta vazio ao extrair CRT.');
+        }
+
+        if (str_contains($bodyRaw, '-----BEGIN CERTIFICATE-----') && str_contains($bodyRaw, '-----END CERTIFICATE-----')) {
+            $inicio = strpos($bodyRaw, '-----BEGIN CERTIFICATE-----');
+            $fim    = strpos($bodyRaw, '-----END CERTIFICATE-----');
+            if ($inicio !== false && $fim !== false) {
+                $tamanho = ($fim - $inicio) + strlen('-----END CERTIFICATE-----');
+                return trim(substr($bodyRaw, $inicio, $tamanho));
+            }
+        }
+
+        if (str_contains($bodyRaw, '-----BEGIN X509 CERTIFICATE-----')) {
+            return trim($bodyRaw);
+        }
+
+        $linhas = preg_split("/\r\n|\n|\r/", $bodyRaw);
+        $linhas = is_array($linhas) ? $linhas : [];
+        $certLinhas = [];
+        $gravando = false;
+        foreach ($linhas as $linha) {
+            $linha = rtrim($linha);
+            if (str_starts_with($linha, '-----BEGIN') && str_contains($linha, 'CERTIFICATE')) {
+                $gravando = true;
+            }
+            if ($gravando) {
+                $certLinhas[] = $linha;
+            }
+            if ($gravando && str_starts_with($linha, '-----END') && str_contains($linha, 'CERTIFICATE')) {
+                $gravando = false;
+                break;
+            }
+        }
+
+        if ($certLinhas !== []) {
+            $reconstruido = implode("\n", $certLinhas);
+            if (CertificateUtil::validarPEMCertificado($reconstruido)) {
+                return $reconstruido;
+            }
+        }
+
+        $provavelPEM = "-----BEGIN CERTIFICATE-----\n" .
+                       wordwrap(preg_replace('/\s+/', '', $bodyRaw) ?? '', 64, "\n", true) .
+                       "\n-----END CERTIFICATE-----";
+        if (CertificateUtil::validarPEMCertificado($provavelPEM)) {
+            return $provavelPEM;
+        }
+
+        if (CertificateUtil::validarPEMCertificado($bodyRaw)) {
+            return $bodyRaw;
+        }
+
+        throw new ValidationException('Não foi possível extrair um certificado PEM válido da resposta da API de renovação Itaú.');
+    }
+
+    private function postRawTextInterno(string $urlPath, string $bodyText, array $headers = [])
+    {
+        $caminhoCompleto = rtrim($this->baseUrl, '/') . '/' . ltrim($urlPath, '/');
+
+        $certificado = (string) $this->getCertificado();
+        $chave       = (string) $this->getCertificadoChave();
+        if ($certificado === '' || $chave === '') {
+            throw new ValidationException('Certificado/Chave privada não definidos para requisição mTLS.');
+        }
+
+        $headersFlat = [];
+        foreach ($headers as $hName => $hValue) {
+            if (is_int($hName)) {
+                $headersFlat[] = $hValue;
+            } else {
+                $headersFlat[] = sprintf('%s: %s', $hName, is_array($hValue) ? implode(', ', $hValue) : (string) $hValue);
+            }
+        }
+
+        $ch = curl_init($caminhoCompleto);
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_HEADER, true);
+        curl_setopt($ch, CURLOPT_VERBOSE, false);
+        curl_setopt($ch, CURLOPT_CUSTOMREQUEST, 'POST');
+        curl_setopt($ch, CURLOPT_POSTFIELDS, $bodyText);
+        curl_setopt($ch, CURLOPT_HTTPHEADER, $headersFlat);
+        curl_setopt($ch, CURLOPT_TIMEOUT, 60);
+        curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 15);
+
+        if (is_file($certificado)) {
+            curl_setopt($ch, CURLOPT_SSLCERT, $certificado);
+        }
+        if (is_file($chave)) {
+            curl_setopt($ch, CURLOPT_SSLKEY, $chave);
+        }
+
+        $sslVerify = $this->getSslVerify();
+        curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, (bool) ($sslVerify ?? true));
+        curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, (bool) ($sslVerify ?? true) ? 2 : 0);
+
+        $responseRaw  = curl_exec($ch);
+        $curlErrNo    = curl_errno($ch);
+        $curlErrMsg   = curl_error($ch);
+        $headersResp  = [];
+        $httpCode     = 0;
+        $bodyRaw      = '';
+        $headerSize   = 0;
+
+        if ($responseRaw !== false) {
+            $headerSize = (int) curl_getinfo($ch, CURLINFO_HEADER_SIZE);
+            $httpCode   = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            $headerText = substr($responseRaw, 0, $headerSize);
+            $bodyRaw    = (string) substr($responseRaw, $headerSize);
+
+            foreach (preg_split("/\r\n|\n|\r/", $headerText) ?: [] as $headerLine) {
+                $headerLine = trim($headerLine);
+                if ($headerLine === '' || ! str_contains($headerLine, ':')) {
+                    continue;
+                }
+                [$nome, $valor] = explode(':', $headerLine, 2);
+                $nome  = strtolower(trim($nome));
+                $valor = trim($valor);
+                if (! isset($headersResp[$nome])) {
+                    $headersResp[$nome] = $valor;
+                } elseif (is_array($headersResp[$nome])) {
+                    $headersResp[$nome][] = $valor;
+                } else {
+                    $headersResp[$nome] = [$headersResp[$nome], $valor];
+                }
+            }
+        }
+        $headersResp['http_code']  = $httpCode;
+        $headersResp['curl_errno'] = $curlErrNo;
+        $headersResp['curl_error'] = $curlErrMsg;
+
+        $bodyDecodificado = json_decode($bodyRaw, true);
+        $bodyObj          = is_array($bodyDecodificado) ? (object) $bodyDecodificado : new \stdClass();
+
+        $resposta = (object) [
+            'body'       => $bodyObj,
+            'body_text'  => $bodyRaw,
+            'headers'    => $headersResp,
+        ];
+
+        if ($curlErrNo) {
+            throw new ValidationException('Erro cURL ao chamar API de renovação Itaú: ' . $curlErrMsg);
+        }
+
+        curl_close($ch);
+
+        return $resposta;
     }
 
     // Persiste payloads de requisições em C:\Users\samsung\Desktop\debug-boleto.
